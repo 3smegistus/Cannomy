@@ -1,0 +1,60 @@
+contract FundMe =
+    record spend_args = { recipient : address,
+                        amount    : int }
+    record state = {   contributions : map(address, int),
+                   total         : int,
+                   beneficiary   : address,
+                   deadline      : int,
+                   goal          : int,
+                   minGoal       : int }
+    
+    entrypoint init(beneficiary, deadline, goal, minGoal) : state =
+        { contributions = {},
+          beneficiary   = beneficiary,
+          deadline      = deadline,
+          total         = 0,
+          goal          = goal,
+          minGoal       = minGoal }
+      
+    function is_contributor(addr) =
+        Map.member(addr, state.contributions)
+
+    stateful function spend(args : spend_args) =
+       Chain.spend(args.recipient, args.amount)
+
+    stateful payable entrypoint contribute() =
+        if(Chain.block_height >= state.deadline || state.total >= state.goal)
+            spend({ recipient = Call.caller, amount = Call.value }) // Refund money
+            abort("Campaign is expired or allready reach the goal")
+        else
+            let amount =
+                Map.lookup_default(Call.caller, state.contributions, 0) + Call.value
+            put(state{ contributions[Call.caller] = amount,
+                        total @ tot = tot + Call.value })
+            true
+        
+    stateful function refund_to_contributors(contributors: list(address*int), left: int, total: int) =
+        switch(contributors)
+            [] => total
+            (investor, amount) :: l' =>
+                 require(left >= amount, "Not enough tokens! Aborting") // if for some reason amount of tokens is not enough, the recursion will be aborted
+                 // Send tokens to investor
+                 Chain.spend(investor, amount)
+                 // Remove investor from state
+                 put(state{ contributions @ c = Map.delete(investor, c) }) 
+                 // Recursion. Go to the next investor
+                 refund_to_contributors(l', left - amount, total + amount)
+
+    stateful entrypoint withdraw() =
+        if(Chain.block_height < state.deadline)
+            abort("Cannot withdraw before deadline")
+        if(state.total < state.minGoal)
+            refund_to_contributors(Map.to_list(state.contributions), state.total, 0)
+            abort("Minimal goal is not reached. Refund funds to investors")
+        if(Call.caller == state.beneficiary && state.total >= state.minGoal)
+            withdraw_beneficiary()
+        abort("Not a beneficiary")
+
+    stateful function withdraw_beneficiary() =
+        spend({recipient = state.beneficiary,
+            amount    = Contract.balance })
